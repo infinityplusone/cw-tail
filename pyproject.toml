@@ -1,0 +1,19 @@
+[project]
+name = "cw-tail"
+version = "0.1.0"
+description = "Tail AWS CloudWatch logs with a colored, simplified layout."
+authors = [
+    { name = "Yoni Knoll", email = "yoni@makegov.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "boto3>=1.29.0"
+]
+
+[project.scripts]
+cw-tail = "cw_tail:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

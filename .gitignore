@@ -1,0 +1,12 @@
+/build
+/env
+/cw_tail.egg-info
+/.DS_Store
+.env
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+__pycache__
