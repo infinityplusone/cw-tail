@@ -93,7 +93,7 @@ cw-tail --help
 
 ### Example
 
-Tail logs from the log group specified in your .env file (or override it) from the last 30 minutes with color highlighting enabled:
+Tail logs from the log group specified in your `.env` file (or override it) from the last 30 minutes with color highlighting enabled:
 
 ```bash
 cw-tail --log-group my-logs --since 30m --colorize
