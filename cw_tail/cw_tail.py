@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import argparse
-import time
-import datetime
 import boto3
-import re
-import sys
-import shutil
+import datetime
 import os
+import re
+import shutil
+import sys
+import time
 from dotenv import load_dotenv
+from typing import Callable
+from . import formatters
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -21,6 +23,9 @@ RED     = "\033[31m"
 RESET   = "\033[0m"
 WHITE   = "\033[37m"
 YELLOW  = "\033[33m"
+BLACK   = "\033[30m"
+BG_YELLOW = "\033[03m"
+BLACK_ON_YELLOW = "\033[30;43m"  # Black text on yellow background
 
 COLORS = [
     "\033[38;5;28m",   # rgb(0,135,0)
@@ -41,8 +46,10 @@ COLORS = [
 # Ensure UTF-8 encoding for stdout (helps with emojis, etc.)
 sys.stdout.reconfigure(encoding="utf-8")
 
-
 class CloudWatchTailer:
+    """
+    Tail an AWS CloudWatch log group with a simplified layout.
+    """
     def __init__(
         self,
         log_group: str,
@@ -53,6 +60,8 @@ class CloudWatchTailer:
         exclude_streams: list[str] = None,
         since_seconds: int = 3600,
         colorize: bool = False,
+        formatter: Callable = None,
+        format_options: dict = None,
     ):
         self.log_group = log_group
         self.region = region
@@ -62,6 +71,11 @@ class CloudWatchTailer:
         self.exclude_streams = exclude_streams or []
         self.since_seconds = since_seconds
         self.colorize = colorize
+        try:
+            self.formatter = getattr(formatters, formatter) if formatter else None
+            self.format_options = format_options or {}
+        except AttributeError:
+            raise ValueError(f"Formatter {formatter} not found")
 
         # Create a boto3 session and CloudWatch logs client
         self.session = boto3.Session(region_name=self.region)
@@ -91,7 +105,6 @@ class CloudWatchTailer:
         Format a log line with a left column for the container and timestamp,
         and the message in the right column.
         """
-        terminal_size = shutil.get_terminal_size((80, 20))
         spacing = 1
         separator = " " * spacing + "|" + " " * spacing
 
@@ -153,17 +166,17 @@ class CloudWatchTailer:
                         continue
                     stream_name = stream_name.split("/")[-1][:9]
 
-                    message = event["message"].rstrip("\n")
+                    message = self._format_message(event["message"])
                     if self.colorize:
                         if self.highlight_tokens:
                             for token in self.highlight_tokens:
                                 message = re.sub(
-                                    rf"({token})", f"{CYAN}\\1{RESET}", message, flags=re.IGNORECASE
+                                    rf"\b({token})\b", f"{BLACK_ON_YELLOW}\\1{RESET}", message, flags=re.IGNORECASE
                                 )
                         if self.filter_tokens:
                             pattern = "|".join(self.filter_tokens)
                             message = re.sub(
-                                rf"({pattern})", f"{GREEN}\\1{RESET}", message, flags=re.IGNORECASE
+                                rf"\b({pattern})\b", f"{GREEN}\\1{RESET}", message, flags=re.IGNORECASE
                             )
 
                     formatted = self._format_log_line(ts_str, message, stream_name)
@@ -181,6 +194,17 @@ class CloudWatchTailer:
             except Exception as e:
                 print(f"Error: {e}", file=sys.stderr)
                 time.sleep(5)
+
+    def _format_message(self, message: str) -> str:
+        """
+        Format the log message to remove ANSI escape codes and ensure proper line breaks.
+        
+        Overriding this method is your best bet to customize the log message.
+        """
+        message = message.rstrip("\n")
+        if self.formatter and callable(self.formatter):
+            message = self.formatter(message, **self.format_options)
+        return message
 
 
 def parse_time_string(time_str: str) -> int:
@@ -201,8 +225,19 @@ def parse_time_string(time_str: str) -> int:
         return value
     return 3600
 
+def parse_qs(qs: str) -> dict:
+    """
+    Parse a querystring-like string into a dictionary.
+    
+    Example:
+    >>> parse_qs("a=1&b=2&c=3")
+    {'a': '1', 'b': '2', 'c': '3'}
+    """
+    return dict(opt.strip().split("=", 1) for opt in qs.strip().split("&") if opt and "=" in opt)
+
 
 def main():
+    
     parser = argparse.ArgumentParser(
         usage="cw-tail [options]",
         description="Tail an AWS CloudWatch log group with a simplified layout.",
@@ -251,6 +286,16 @@ def main():
         default=colorize_default,
         help="Enable ANSI color highlighting. (Set COLORIZE in your .env file to true to enable by default)"
     )
+    parser.add_argument(
+        "--formatter",
+        default=os.getenv("FORMATTER", ""),
+        help="Formatter to use. (Set FORMATTER in your .env file)"
+    )
+    parser.add_argument(
+        "--format-options",
+        default=os.getenv("FORMAT_OPTIONS", ""),
+        help="Querystring-like options to pass to the formatter. (Set FORMAT_OPTIONS in your .env file)"
+    )
 
     args = parser.parse_args()
     if not args.log_group:
@@ -267,6 +312,8 @@ def main():
         exclude_streams=args.exclude_streams.split(),
         since_seconds=seconds_ago,
         colorize=args.colorize,
+        formatter=args.formatter,
+        format_options=parse_qs(args.format_options),
     )
     tailer.tail()
 
