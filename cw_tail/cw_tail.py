@@ -42,7 +42,12 @@ class CloudWatchTailer:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-        self.filter_tokens = [str(t).strip().lstrip("?") for t in self.filter_tokens] if hasattr(self, "filter_tokens") else [] 
+        if hasattr(self, "filter_tokens"):
+            if isinstance(self.filter_tokens, str):
+                self.filter_tokens = self.filter_tokens.split(",")
+            self.filter_tokens = [str(t).strip().lstrip("?") for t in self.filter_tokens]
+        else:
+            self.filter_tokens = []
         self.filter_pattern = " ".join(f"?{t}" for t in self.filter_tokens)
 
         try:
