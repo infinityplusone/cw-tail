@@ -1,18 +1,18 @@
 # cw-tail
 
-**cw-tail** is a Python-based CLI tool that tails AWS CloudWatch logs and displays them in a colored, simplified two‑column layout. It’s designed to help you quickly monitor log activity directly from your terminal.
+**cw-tail** is a Python-based CLI tool that tails AWS CloudWatch logs and displays them in a colored, simplified two‑column layout. It's designed to help you quickly monitor log activity directly from your terminal.
 
 ## Features
 
-- **Configurable via `.env`:** All options (log group, region, filter tokens, etc.) can be set in a `.env` file. Command‑line arguments override these defaults.
-- **Colored Output:** Uses ANSI escape codes to colorize output, making it easier to spot important messages.
-- **Flexible Filtering:** Filter, highlight, or exclude logs based on user‑specified tokens.
-- **Configurable Time Window:** Tail logs from a specified duration (e.g., the last 1 hour, 15 minutes, etc.).
-- **Stream Name Shortening:** Automatically shortens container/log stream names for a cleaner display.
+- **Multiple Named Configurations:** Store different configurations for various environments or use cases in a single YAML file
+- **Colored Output:** Uses ANSI escape codes to colorize output, making it easier to spot important messages
+- **Flexible Filtering:** Filter, highlight, or exclude logs based on user‑specified tokens
+- **Configurable Time Window:** Tail logs from a specified duration (e.g., the last 1 hour, 15 minutes, etc.)
+- **Stream Name Shortening:** Automatically shortens container/log stream names for a cleaner display
 
 ## Requirements
 
-- Python 3.8 or later
+- Python 3.12 or later
 - AWS credentials configured (via environment variables, AWS CLI configuration, or IAM roles)
 - [boto3](https://pypi.org/project/boto3/) (installed automatically with the package)
 
@@ -31,7 +31,7 @@ Alternatively, you can set these values as environment variables.
 
 ## Installation
 
-It’s best to install `cw-tail` inside a virtual environment to avoid any system conflicts.
+It's best to install `cw-tail` inside a virtual environment to avoid any system conflicts.
 
 1. **Create & Activate a Virtual Environment:**
 
@@ -48,7 +48,7 @@ It’s best to install `cw-tail` inside a virtual environment to avoid any syste
 
 ### Simple Installation
 
-The `install.sh` script will create a virtual environment, install the package, and set up the environment variables.
+The `install.sh` script will create a virtual environment and install the package:
 
 ```bash
 ./install.sh
@@ -56,31 +56,37 @@ The `install.sh` script will create a virtual environment, install the package, 
 
 ## Configuration
 
-Create a `.env` file in the same directory as the tool with the following variables:
+Create a configuration file at `/cw-tail/config.yml`. There is an example configuration file in the repository in the correct location. The tool will create a default configuration if none exists. Here's an example configuration:
 
-```ini
-# Name of the CloudWatch log group (required)
-LOG_GROUP=your-log-group
+```yaml
+default:
+  region: us-east-1
+  since: 1h
+  colorize: true
 
-# AWS region (default is us-east-1)
-REGION=us-east-1
+prod:
+  log_group: production-logs
+  since: 10m
+  highlight_tokens: [301, 302, 429, 500, error, warning, critical]
+  exclude_tokens: []
+  exclude_streams: []
+  formatter: json_formatter
+  format_options:
+    remove_keys: logger
+    key_value_pairs: level:info,level:debug,ip:my-ip-address
 
-# Optional filtering options (space-separated tokens)
-FILTER_PATTERN=
-HIGHLIGHT_TOKENS=
-EXCLUDE_TOKENS=
-EXCLUDE_STREAMS=
-
-# How far back to start tailing logs (e.g., 1h, 15m, 10s)
-SINCE=1h
-
-# Enable color highlighting by default (true or false)
-COLORIZE=true
+dev:
+  log_group: development-logs
+  since: 10m
+  highlight_tokens: [429, 500, error, warning, critical]
+  exclude_tokens: []
+  formatter: json_formatter
+  format_options:
+    remove_keys: logger,request_id
+    key_value_pairs: ip:my-ip-address
 ```
 
-There is a sample `.env` file in the root of the project.
-
-Any values provided via command‑line arguments will override these defaults.
+Any values provided via command‑line arguments will override these configuration values.
 
 ## Usage
 
@@ -91,12 +97,17 @@ source env/bin/activate  # On Windows: env\Scripts\activate
 cw-tail --help
 ```
 
-### Example
-
-Tail logs from the log group specified in your `.env` file (or override it) from the last 30 minutes with color highlighting enabled:
+### Examples
 
 ```bash
-cw-tail --log-group my-logs --since 30m --colorize
+# Use the prod configuration
+cw-tail --config prod
+
+# Use the dev configuration but override the time window
+cw-tail --config dev --since 30m
+
+# Use default configuration with a specific log group
+cw-tail --log-group my-logs --colorize
 ```
 
 ### AWS CLI Setup Reminder

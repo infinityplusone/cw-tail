@@ -10,3 +10,4 @@
 *.pyz
 *.pywz
 __pycache__
+config.yml

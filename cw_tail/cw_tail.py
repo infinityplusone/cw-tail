@@ -2,45 +2,33 @@
 import argparse
 import boto3
 import datetime
-import os
 import re
 import shutil
 import sys
 import time
-from dotenv import load_dotenv
-from typing import Callable
+import traceback
+from rich.text import Text
+from rich.console import Console
 from . import formatters
+from .utils import *
 
-# Load environment variables from a .env file
-load_dotenv()
+console = Console()
 
-# ANSI color codes
-BLUE    = "\033[34m"
-CYAN    = "\033[36m"
-GREEN   = "\033[32m"
-PURPLE  = "\033[35m"
-RED     = "\033[31m"
-RESET   = "\033[0m"
-WHITE   = "\033[37m"
-YELLOW  = "\033[33m"
-BLACK   = "\033[30m"
-BG_YELLOW = "\033[03m"
-BLACK_ON_YELLOW = "\033[30;43m"  # Black text on yellow background
 
-COLORS = [
-    "\033[38;5;28m",   # rgb(0,135,0)
-    "\033[38;5;136m",  # rgb(175,135,0)
-    "\033[38;5;90m",   # rgb(135,0,135)
-    "\033[38;5;31m",   # rgb(0,135,175)
-    "\033[38;5;168m",  # rgb(215,95,135)
-    "\033[38;5;73m",   # rgb(95,175,175)
-    "\033[38;5;61m",   # rgb(95,95,175)
-    "\033[38;5;216m",  # rgb(255,175,135)
-    "\033[38;5;24m",   # rgb(0,95,135)
-    "\033[38;5;184m",  # rgb(215,215,0)
-    "\033[38;5;31m",   # rgb(0,135,175)
-    "\033[38;5;209m",  # rgb(255,135,95)
-    "\033[38;5;93m",   # rgb(87,87,255)
+STREAM_COLORS = [
+    lambda text: Text(text, style=f"rgb(0,135,0)"),
+    lambda text: Text(text, style=f"rgb(175,135,0)"),
+    lambda text: Text(text, style=f"rgb(135,0,135)"),
+    lambda text: Text(text, style=f"rgb(0,135,175)"),
+    lambda text: Text(text, style=f"rgb(215,95,135)"),
+    lambda text: Text(text, style=f"rgb(95,175,175)"),
+    lambda text: Text(text, style=f"rgb(95,95,175)"),
+    lambda text: Text(text, style=f"rgb(255,175,135)"),
+    lambda text: Text(text, style=f"rgb(0,95,135)"),
+    lambda text: Text(text, style=f"rgb(215,215,0)"),
+    lambda text: Text(text, style=f"rgb(0,135,175)"),
+    lambda text: Text(text, style=f"rgb(255,135,95)"),
+    lambda text: Text(text, style=f"rgb(87,87,255)"),
 ]
 
 # Ensure UTF-8 encoding for stdout (helps with emojis, etc.)
@@ -50,32 +38,20 @@ class CloudWatchTailer:
     """
     Tail an AWS CloudWatch log group with a simplified layout.
     """
-    def __init__(
-        self,
-        log_group: str,
-        region: str = "us-east-1",
-        filter_tokens: list[str] = None,
-        highlight_tokens: list[str] = None,
-        exclude_tokens: list[str] = None,
-        exclude_streams: list[str] = None,
-        since_seconds: int = 3600,
-        colorize: bool = False,
-        formatter: Callable = None,
-        format_options: dict = None,
-    ):
-        self.log_group = log_group
-        self.region = region
-        self.filter_tokens = filter_tokens or []
-        self.highlight_tokens = highlight_tokens or []
-        self.exclude_tokens = exclude_tokens or []
-        self.exclude_streams = exclude_streams or []
-        self.since_seconds = since_seconds
-        self.colorize = colorize
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+        self.filter_tokens = [str(t).strip().lstrip("?") for t in self.filter_tokens] if hasattr(self, "filter_tokens") else [] 
+        self.filter_pattern = " ".join(f"?{t}" for t in self.filter_tokens)
+
         try:
-            self.formatter = getattr(formatters, formatter) if formatter else None
-            self.format_options = format_options or {}
+            if self.formatter:
+                self.formatter = getattr(formatters, self.formatter)
         except AttributeError:
-            raise ValueError(f"Formatter {formatter} not found")
+            print(f"Formatter {self.formatter} not found")
+            print(traceback.format_exc(), file=sys.stderr)
+            raise ValueError(f"Formatter {self.formatter} not found")
 
         # Create a boto3 session and CloudWatch logs client
         self.session = boto3.Session(region_name=self.region)
@@ -83,6 +59,7 @@ class CloudWatchTailer:
 
         # For assigning consistent colors per container
         self.containers = {}
+        self.colors = color_funcs()
         
     def _scroll_up(self, min_lines: int = 10):
         """
@@ -93,12 +70,43 @@ class CloudWatchTailer:
             min_lines (int): Minimum blank lines to print if terminal height is unknown.
         """
         # Get terminal size (fallback to 24 rows if it can't be determined)
-        rows, _ = shutil.get_terminal_size(fallback=(24, 80))
+        _, rows = shutil.get_terminal_size(fallback=(80, 24))
         
         # Adjust the scroll amount based on estimated prior output
-        scroll_lines = max(rows - 5, min_lines)  # Leave some buffer
-        sys.stdout.write("\n" * scroll_lines)
-        sys.stdout.flush()
+        scrolled_lines = 0
+        try:
+            while scrolled_lines < max(rows - 5, min_lines):
+                scrolled_lines += 1
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                sleep(0.005)
+        except KeyboardInterrupt:
+            # If interrupted, finish the scroll immediately
+            remaining_lines = max(rows - 5, min_lines) - scrolled_lines
+            if remaining_lines > 0:
+                sys.stdout.write("\n" * remaining_lines)
+                sys.stdout.flush()
+            raise
+
+    def _print_header(self):
+        """
+        Print the header of the log group.
+        """
+        cols, _ = shutil.get_terminal_size(fallback=(80, 24))
+
+        header = f"""
+            {("=" * cols)}
+            Starting tail of log group: {self.log_group}
+            Region: {self.region}
+            Filter pattern: {self.filter_pattern or '(none)'}
+            Highlight tokens: {self.highlight_tokens or '(none)'}
+            Exclude tokens: {self.exclude_tokens or '(none)'}
+            Exclude streams: {self.exclude_streams or '(none)'}
+            Fetching logs since: {self.since} seconds ago
+            Press Ctrl+C to stop.
+            {("=" * cols)}
+        """
+        print("\n".join([line.lstrip() for line in header.split("\n")]))
 
     def _format_log_line(self, timestamp_str: str, message: str, container: str) -> str:
         """
@@ -110,31 +118,90 @@ class CloudWatchTailer:
 
         if container not in self.containers:
             self.containers[container] = (
-                COLORS[len(self.containers) % len(COLORS)] if self.colorize else ""
+                STREAM_COLORS[len(self.containers) % len(STREAM_COLORS)]
+                if self.colorize else lambda x: x
             )
         container_color = self.containers[container]
+        left_col = f"{container_color(container)}{separator}{timestamp_str}{separator}"
 
-        left_col = f"{container_color}{container}{separator}{timestamp_str}{separator}{RESET}"
-        left_width = len(left_col)
-        indentation = " " * left_width
-        wrapped_message = message.replace("\n", "\n" + indentation)
-        return f"{left_col}{wrapped_message}\n"
+        # Create a Text object combining all parts
+        line = Text()
+        line.append(container_color(left_col))
+        # If message is already a Text object, append it directly
+        if isinstance(message, Text):
+            line.append(message)
+        else:
+            line.append(str(message))
+        line.append("\n")
+        
+        return line
+
+    def _format_message(self, message: str) -> str:
+        """
+        Format the log message to remove ANSI escape codes and ensure proper line breaks.
+        
+        Overriding this method is your best bet to customize the log message.
+        """
+        message = message.rstrip("\n")
+        if self.formatter and callable(self.formatter):
+            message = self.formatter(message, **self.format_options)
+        return message
+
+    def _highlight(self, message: str, tokens: list[str], style: str) -> Text:
+        """
+        Highlight tokens in a message using a style.
+        Tokens can be either literal strings or regular expressions.
+        """
+        text = Text(message)
+
+        for token in tokens:
+            token = str(token)
+            try:
+                # Try to compile as regex first
+                pattern = re.compile(rf"\b{token}\b", flags=re.IGNORECASE)
+            except re.error:
+                # If it's not a valid regex, escape it for literal matching
+                pattern = re.compile(rf"\b{re.escape(token)}\b", flags=re.IGNORECASE)
+            
+            for match in pattern.finditer(message):
+                start, end = match.span()
+                text.stylize(style, start, end)
+        return text
+
+    def _highlight_multiple(self, message: str, token_styles: list[tuple[str, str]]) -> Text:
+        """
+        Highlight multiple sets of tokens in a message using their respective styles.
+        Tokens can be either literal strings or regular expressions.
+        
+        Args:
+            message: The message to highlight
+            token_styles: List of (token, style) tuples
+        """
+        text = Text(message)
+
+        for token, style in token_styles:
+            token = str(token)
+            try:
+                # Try to compile as regex first
+                pattern = re.compile(rf"\b{token}\b", flags=re.IGNORECASE)
+            except re.error:
+                # If it's not a valid regex, escape it for literal matching
+                pattern = re.compile(rf"\b{re.escape(token)}\b", flags=re.IGNORECASE)
+            
+            for match in pattern.finditer(message):
+                start, end = match.span()
+                text.stylize(style, start, end)
+        return text
+
 
     def tail(self):
         """
         Continuously poll CloudWatch Logs for new events in the log group and print them.
         """
         next_token = None
-        start_time = int(time.time() - self.since_seconds) * 1000
-        filter_pattern = " ".join(f"?{t}" for t in self.filter_tokens) if self.filter_tokens else ""
-        
+        start_time = int(time.time() - self.since) * 1000
         self._scroll_up()
-
-        print(f"Starting tail of log group: {self.log_group}")
-        print(f"Region: {self.region}")
-        print(f"Filter pattern: {filter_pattern or '(none)'}")
-        print(f"Fetching logs since: {self.since_seconds} seconds ago")
-        print("Press Ctrl+C to stop.\n")
+        self._print_header()
 
         while True:
             try:
@@ -143,8 +210,8 @@ class CloudWatchTailer:
                     "startTime": start_time,
                     "interleaved": True,
                 }
-                if filter_pattern:
-                    kwargs["filterPattern"] = filter_pattern
+                if self.filter_pattern:
+                    kwargs["filterPattern"] = self.filter_pattern
                 if next_token:
                     kwargs["nextToken"] = next_token
 
@@ -166,155 +233,110 @@ class CloudWatchTailer:
                         continue
                     stream_name = stream_name.split("/")[-1][:9]
 
-                    message = self._format_message(event["message"])
+                    message_text = self._format_message(event["message"])
                     if self.colorize:
-                        if self.highlight_tokens:
-                            for token in self.highlight_tokens:
-                                message = re.sub(
-                                    rf"\b({token})\b", f"{BLACK_ON_YELLOW}\\1{RESET}", message, flags=re.IGNORECASE
-                                )
-                        if self.filter_tokens:
-                            pattern = "|".join(self.filter_tokens)
-                            message = re.sub(
-                                rf"\b({pattern})\b", f"{GREEN}\\1{RESET}", message, flags=re.IGNORECASE
-                            )
+                        message_text = Text(message_text)
+                        # Apply both highlights in a single Text object
+                        if self.highlight_tokens or self.filter_tokens:
+                            all_highlights = []
+                            if self.highlight_tokens:
+                                all_highlights.extend((token, "black on yellow") for token in self.highlight_tokens)
+                            if self.filter_tokens:
+                                all_highlights.extend((token, "dark_green") for token in self.filter_tokens)
+                            message_text = self._highlight_multiple(str(message_text), all_highlights)
 
-                    formatted = self._format_log_line(ts_str, message, stream_name)
-                    print(formatted, end="")
+                    formatted = self._format_log_line(ts_str, message_text, stream_name)
+                    console.print(formatted, end="")
 
-                time.sleep(2)
+                sleep(20)
                 if events:
                     max_ts = max(e["timestamp"] for e in events)
                     if max_ts > start_time:
                         start_time = max_ts + 1
-
             except KeyboardInterrupt:
                 print("\nExiting tail...")
                 break
             except Exception as e:
                 print(f"Error: {e}", file=sys.stderr)
-                time.sleep(5)
+                print(traceback.format_exc(), file=sys.stderr)
+                # use a sleep to avoid busy-waiting
+                sleep(100)
 
-    def _format_message(self, message: str) -> str:
-        """
-        Format the log message to remove ANSI escape codes and ensure proper line breaks.
-        
-        Overriding this method is your best bet to customize the log message.
-        """
-        message = message.rstrip("\n")
-        if self.formatter and callable(self.formatter):
-            message = self.formatter(message, **self.format_options)
-        return message
-
-
-def parse_time_string(time_str: str) -> int:
-    """
-    Converts a string like "1h", "15m", or "10s" to seconds. Defaults to 3600 seconds.
-    """
-    match = re.match(r"^(\d+)([hms])$", time_str.strip(), re.IGNORECASE)
-    if not match:
-        return 3600
-    value, unit = match.groups()
-    value = int(value)
-    unit = unit.lower()
-    if unit == "h":
-        return value * 3600
-    elif unit == "m":
-        return value * 60
-    elif unit == "s":
-        return value
-    return 3600
-
-def parse_qs(qs: str) -> dict:
-    """
-    Parse a querystring-like string into a dictionary.
-    
-    Example:
-    >>> parse_qs("a=1&b=2&c=3")
-    {'a': '1', 'b': '2', 'c': '3'}
-    """
-    return dict(opt.strip().split("=", 1) for opt in qs.strip().split("&") if opt and "=" in opt)
 
 
 def main():
-    
+    """
+    Main entry point for the cw-tail command.
+    """
     parser = argparse.ArgumentParser(
         usage="cw-tail [options]",
-        description="Tail an AWS CloudWatch log group with a simplified layout.",
-        epilog="Example: cw-tail --log-group my-logs --since 30m --colorize"
+        description="Tail AWS CloudWatch logs with a colored, simplified layout.",
+        epilog="""
+Examples:
+  cw-tail --config prod                      # Use the prod configuration
+  cw-tail --config dev --since 30m           # Use dev config but override the time window
+  cw-tail --log-group my-logs --colorize     # Use default config with specific log group
+        """
     )
-    # Default values come from environment variables (set in .env) if available
+    
+    parser.add_argument(
+        "--config",
+        help="Name of the configuration to use from ~/.config/cw-tail/config.yml"
+    )
     parser.add_argument(
         "--log-group",
-        default=os.getenv("LOG_GROUP"),
-        help="Name of the CloudWatch log group to tail. (Set LOG_GROUP in your .env file)"
+        help="Name of the CloudWatch log group to tail"
     )
     parser.add_argument(
         "--region",
-        default=os.getenv("REGION", "us-east-1"),
-        help="AWS region (default: us-east-1) or set REGION in your .env file"
+        help="AWS region (default: us-east-1)"
     )
     parser.add_argument(
-        "--filter-pattern",
-        default=os.getenv("FILTER_PATTERN", ""),
-        help="Space-separated words to filter on, e.g. 'Finished error fail'. (Set FILTER_PATTERN in your .env file)"
+        "--filter-tokens",
+        help="Filter logs containing these comma-separated tokens (uses AWS's filter pattern syntax)"
     )
     parser.add_argument(
         "--highlight-tokens",
-        default=os.getenv("HIGHLIGHT_TOKENS", ""),
-        help="Space-separated words to highlight. (Set HIGHLIGHT_TOKENS in your .env file)"
+        help="Highlight logs containing these comma-separated tokens. Accepts regexes"
     )
     parser.add_argument(
         "--exclude-tokens",
-        default=os.getenv("EXCLUDE_TOKENS", ""),
-        help="Space-separated words to exclude. (Set EXCLUDE_TOKENS in your .env file)"
+        help="Exclude logs containing these comma-separated tokens"
     )
     parser.add_argument(
         "--exclude-streams",
-        default=os.getenv("EXCLUDE_STREAMS", ""),
-        help="Space-separated tokens to exclude stream names. (Set EXCLUDE_STREAMS in your .env file)"
+        help="Exclude logs from these comma-separated stream names"
     )
     parser.add_argument(
         "--since",
-        default=os.getenv("SINCE", "1h"),
-        help="How far back to start (e.g. '10s', '15m', '2h'). Default '1h'. (Set SINCE in your .env file)"
+        help="How far back to get logs (e.g., 1h, 15m, 30s)"
     )
-    colorize_default = os.getenv("COLORIZE", "true").lower() in ("true", "1", "yes")
     parser.add_argument(
         "--colorize",
         action="store_true",
-        default=colorize_default,
-        help="Enable ANSI color highlighting. (Set COLORIZE in your .env file to true to enable by default)"
+        help="Enable colored output"
     )
     parser.add_argument(
         "--formatter",
-        default=os.getenv("FORMATTER", ""),
         help="Formatter to use. (Set FORMATTER in your .env file)"
     )
     parser.add_argument(
         "--format-options",
-        default=os.getenv("FORMAT_OPTIONS", ""),
         help="Querystring-like options to pass to the formatter. (Set FORMAT_OPTIONS in your .env file)"
     )
 
     args = parser.parse_args()
-    if not args.log_group:
-        parser.error("log-group is required. Provide via --log-group or set LOG_GROUP in your .env file")
+    
+    # Load config and merge with command line arguments
+    config = load_config(args.config) | parse_command_line_arguments(args)
 
-    seconds_ago = parse_time_string(args.since)
+    if not config.get("log_group"):
+        parser.error("log-group is required. Provide via --log-group or config file")
 
-    tailer = CloudWatchTailer(
-        log_group=args.log_group,
-        region=args.region,
-        filter_tokens=args.filter_pattern.split(),
-        highlight_tokens=args.highlight_tokens.split(),
-        exclude_tokens=args.exclude_tokens.split(),
-        exclude_streams=args.exclude_streams.split(),
-        since_seconds=seconds_ago,
-        colorize=args.colorize,
-        formatter=args.formatter,
-        format_options=parse_qs(args.format_options),
-    )
+    # Convert time strings to seconds
+    config["since"] = parse_time_string(config.get("since", "1h"))
+
+    tailer = CloudWatchTailer(**config)
     tailer.tail()
 
 

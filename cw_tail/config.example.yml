@@ -1,0 +1,34 @@
+default:
+  region: us-east-1
+  since: 1h
+  colorize: true
+
+prod:
+  log_group: production-logs
+  since: 10m
+  highlight_tokens:
+    - 301
+    - 302
+    - 429
+    - 500
+    - error
+    - warning
+    - critical
+    - '\b123\.123\.\d{1,3}\.\d{1,3}\b' 
+  exclude_tokens: []
+  exclude_streams: []
+  formatter: json_formatter
+  format_options:
+    remove_keys: logger
+    key_value_pairs: level:info,level:debug,ip:my-ip-address
+
+dev:
+  log_group: development-logs
+  since: 10m``
+  highlight_tokens: [429, 500, error, warning, critical]
+  exclude_tokens: []
+  formatter: json_formatter
+  format_options:
+    remove_keys: logger,request_id
+    key_value_pairs: ip:my-ip-address
+  
