@@ -1,6 +1,6 @@
 [project]
 name = "cw-tail"
-version = "0.2.0"
+version = "0.2.1"
 description = "Tail AWS CloudWatch logs with a colored, simplified layout."
 authors = [
     { name = "Yoni Knoll", email = "yoni@makegov.com" }
@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.36.25",
     "pyyaml>=6.0.2",
-    "rich>=13.9.4"
+    "rich>=13.9.4",
+    "tomli>=2.0.1"
 ]
 
 [project.scripts]

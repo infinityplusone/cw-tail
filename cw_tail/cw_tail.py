@@ -7,6 +7,8 @@ import shutil
 import sys
 import time
 import traceback
+import tomllib as tomli
+from pathlib import Path
 from rich.text import Text
 from rich.console import Console
 from . import formatters
@@ -14,6 +16,12 @@ from .utils import *
 
 console = Console()
 
+# Add this after the console initialization
+try:
+    with open(Path(__file__).parent.parent / "pyproject.toml", "r") as f:
+        PACKAGE_VERSION = tomli.loads(f.read())["project"]["version"]
+except (FileNotFoundError, KeyError) as e:
+    PACKAGE_VERSION = "??"
 
 STREAM_COLORS = [
     lambda text: Text(text, style=f"rgb(0,135,0)"),
@@ -41,14 +49,8 @@ class CloudWatchTailer:
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
             setattr(self, key, value)
-
-        if hasattr(self, "filter_tokens"):
-            if isinstance(self.filter_tokens, str):
-                self.filter_tokens = self.filter_tokens.split(",")
-            self.filter_tokens = [str(t).strip().lstrip("?") for t in self.filter_tokens]
-        else:
-            self.filter_tokens = []
-        self.filter_pattern = " ".join(f"?{t}" for t in self.filter_tokens)
+        
+        self._parse_filter_and_exclude_tokens()
 
         try:
             if self.formatter:
@@ -66,6 +68,30 @@ class CloudWatchTailer:
         self.containers = {}
         self.colors = color_funcs()
         
+    def _parse_filter_and_exclude_tokens(self):
+        """
+        Get the filter pattern for the log group.
+        """
+        self.filter_pattern = ""
+
+        if hasattr(self, "filter_tokens"):
+            if isinstance(self.filter_tokens, str):
+                self.filter_tokens = self.filter_tokens.split(",")
+            self.filter_tokens = [str(t).strip().lstrip("?") for t in self.filter_tokens]
+        else:
+            self.filter_tokens = []
+        self.filter_pattern = " ".join(f"?{t}" for t in self.filter_tokens)
+        
+        if hasattr(self, "exclude_tokens"):
+            if isinstance(self.exclude_tokens, str):
+                self.exclude_tokens = self.exclude_tokens.split(",")
+            self.exclude_tokens = [str(t).strip().lstrip("?") for t in self.exclude_tokens]
+        else:
+            self.exclude_tokens = []
+        self.filter_pattern += " " + " ".join(f"-{t}" for t in self.exclude_tokens)
+        self.filter_pattern = self.filter_pattern.strip()
+
+    
     def _scroll_up(self, min_lines: int = 10):
         """
         Scrolls up the terminal by printing blank lines to push existing content off the screen.
@@ -101,12 +127,14 @@ class CloudWatchTailer:
 
         header = f"""
             {("=" * cols)}
+            cw-tail v{PACKAGE_VERSION}
             Starting tail of log group: {self.log_group}
             Region: {self.region}
-            Filter pattern: {self.filter_pattern or '(none)'}
-            Highlight tokens: {self.highlight_tokens or '(none)'}
+            CW Filter pattern: {self.filter_pattern or '(none)'}
+            Filter tokens: {self.filter_tokens or '(none)'}
             Exclude tokens: {self.exclude_tokens or '(none)'}
             Exclude streams: {self.exclude_streams or '(none)'}
+            Highlight tokens: {self.highlight_tokens or '(none)'}
             Fetching logs since: {self.since} seconds ago
             Press Ctrl+C to stop.
             {("=" * cols)}
@@ -151,6 +179,35 @@ class CloudWatchTailer:
         if self.formatter and callable(self.formatter):
             message = self.formatter(message, **self.format_options)
         return message
+
+    def _get_included_streams(self):
+        """
+        Returns a list of log stream names to include, i.e., everything
+        except the ones you want to exclude.
+        """
+        included_streams = []
+        next_token = None
+
+        while True:
+            kwargs = {
+                "logGroupName": self.log_group,
+                "orderBy": "LastEventTime",  # or 'LogStreamName'
+            }
+            if next_token:
+                kwargs["nextToken"] = next_token
+
+            resp = self.logs_client.describe_log_streams(**kwargs)
+            for s in resp["logStreams"]:
+                name = s["logStreamName"]
+                # If exclude_streams is set, skip any whose names contain an exclude token
+                if not self.exclude_streams or not any(x in name for x in self.exclude_streams):
+                    included_streams.append(name)
+
+            next_token = resp.get("nextToken")
+            if not next_token:
+                break
+        
+        return included_streams
 
     def _highlight(self, message: str, tokens: list[str], style: str) -> Text:
         """
@@ -198,50 +255,83 @@ class CloudWatchTailer:
                 text.stylize(style, start, end)
         return text
 
-
     def tail(self):
         """
-        Continuously poll CloudWatch Logs for new events in the log group and print them.
+        Continuously poll CloudWatch Logs for new events in the log group and print them,
+        skipping excluded streams at the AWS side.
         """
         next_token = None
         start_time = int(time.time() - self.since) * 1000
         self._scroll_up()
         self._print_header()
 
+        # Get the streams we DO want to include (i.e. everything except the excludes)
+        included_streams = []
+        if self.exclude_streams:
+            included_streams = self._get_included_streams()
+        
+        # If we have more than 100 streams, we'll chunk them:
+        def chunk_list(lst, chunk_size=100):
+            for i in range(0, len(lst), chunk_size):
+                yield lst[i:i+chunk_size]
+        
         while True:
             try:
-                kwargs = {
-                    "logGroupName": self.log_group,
-                    "startTime": start_time,
-                    "interleaved": True,
-                }
-                if self.filter_pattern:
-                    kwargs["filterPattern"] = self.filter_pattern
-                if next_token:
-                    kwargs["nextToken"] = next_token
+                # We'll gather all events from every chunk of included_streams in a single loop iteration
+                all_events = []
 
-                resp = self.logs_client.filter_log_events(**kwargs)
-                next_token = resp.get("nextToken")
-                events = resp.get("events", [])
+                if included_streams:
+                    # Use chunked calls if we have more than 100 streams
+                    for chunk in chunk_list(included_streams, 100):
+                        kwargs = {
+                            "logGroupName": self.log_group,
+                            "startTime": start_time,
+                            "interleaved": True,
+                            "logStreamNames": chunk,  # <== pass only these streams
+                        }
+                        if self.filter_pattern:
+                            kwargs["filterPattern"] = self.filter_pattern
+                        if next_token:
+                            kwargs["nextToken"] = next_token
 
+                        resp = self.logs_client.filter_log_events(**kwargs)
+                        all_events.extend(resp.get("events", []))
+                        next_token = resp.get("nextToken")
+                else:
+                    # If no exclude_streams or none matched => let it fetch everything
+                    kwargs = {
+                        "logGroupName": self.log_group,
+                        "startTime": start_time,
+                        "interleaved": True,
+                    }
+                    if self.filter_pattern:
+                        kwargs["filterPattern"] = self.filter_pattern
+                    if next_token:
+                        kwargs["nextToken"] = next_token
+
+                    resp = self.logs_client.filter_log_events(**kwargs)
+                    all_events = resp.get("events", [])
+                    next_token = resp.get("nextToken")
+
+                # Exclude tokens from messages client-side if needed
                 if self.exclude_tokens:
-                    events = [
-                        e for e in events if not any(token in e["message"] for token in self.exclude_tokens)
+                    all_events = [
+                        e for e in all_events
+                        if not any(token in e["message"] for token in self.exclude_tokens)
                     ]
 
-                for event in events:
+                # Display them
+                for event in all_events:
                     dt_local = datetime.datetime.fromtimestamp(event["timestamp"] / 1000.0)
                     ts_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
-                    stream_name = event["logStreamName"]
-
-                    if self.exclude_streams and any(stream in stream_name for stream in self.exclude_streams):
-                        continue
-                    stream_name = stream_name.split("/")[-1][:9]
+                    # We'll see the entire stream name. You can still do
+                    # `stream_name = event["logStreamName"].split("/")[-1][:9]` if you like
+                    stream_name = event["logStreamName"].split("/")[-1][:9]
 
                     message_text = self._format_message(event["message"])
                     if self.colorize:
                         message_text = Text(message_text)
-                        # Apply both highlights in a single Text object
+                        # Apply highlight
                         if self.highlight_tokens or self.filter_tokens:
                             all_highlights = []
                             if self.highlight_tokens:
@@ -253,19 +343,19 @@ class CloudWatchTailer:
                     formatted = self._format_log_line(ts_str, message_text, stream_name)
                     console.print(formatted, end="")
 
-                sleep(20)
-                if events:
-                    max_ts = max(e["timestamp"] for e in events)
+                sleep(1)
+                if all_events:
+                    max_ts = max(e["timestamp"] for e in all_events)
                     if max_ts > start_time:
                         start_time = max_ts + 1
+
             except KeyboardInterrupt:
                 print("\nExiting tail...")
                 break
             except Exception as e:
                 print(f"Error: {e}", file=sys.stderr)
                 print(traceback.format_exc(), file=sys.stderr)
-                # use a sleep to avoid busy-waiting
-                sleep(10)
+                sleep(2)
 
 def main():
     """
