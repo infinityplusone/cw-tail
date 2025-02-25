@@ -18,6 +18,8 @@ def json_formatter(message: str, **kwargs) -> str:
         The formatted message.
     """
     def clean_dict(message_as_dict: dict) -> dict:
+        if not isinstance(message_as_dict, dict):
+            return message_as_dict
         for k, v in message_as_dict.items():
             if isinstance(v, dict):
                 message_as_dict[k] = clean_dict(v)
@@ -26,7 +28,10 @@ def json_formatter(message: str, **kwargs) -> str:
             elif isinstance(v, str):
                 message_as_dict[k] = v.strip().replace("\n", " ")
         if kwargs.get("sort"):
-            message_as_dict = OrderedDict(sorted(message_as_dict.items()))
+            if isinstance(message_as_dict, dict):
+                message_as_dict = OrderedDict(sorted(message_as_dict.items()))
+            else:
+                message_as_dict = sorted(message_as_dict)
         return message_as_dict
         
     try:
@@ -34,12 +39,12 @@ def json_formatter(message: str, **kwargs) -> str:
         if kwargs.get("remove_keys"):
             for key in kwargs["remove_keys"].split(","):
                 key = key.strip()
-                if key in message_as_dict:
+                if isinstance(message_as_dict, dict) and key in message_as_dict:
                     message_as_dict.pop(key)
         if kwargs.get("key_value_pairs"):
             for pair in kwargs["key_value_pairs"].split(","):
                 k, v = pair.strip().split(":", 1)
-                if k in message_as_dict and message_as_dict[k] == v:
+                if isinstance(message_as_dict, dict) and k in message_as_dict and message_as_dict[k] == v:
                     message_as_dict.pop(k)
         message_as_dict = clean_dict(message_as_dict)
         return json.dumps(message_as_dict, ensure_ascii=False)

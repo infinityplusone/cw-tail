@@ -247,7 +247,7 @@ class CloudWatchTailer:
                             if self.highlight_tokens:
                                 all_highlights.extend((token, "black on yellow") for token in self.highlight_tokens)
                             if self.filter_tokens:
-                                all_highlights.extend((token, "dark_green") for token in self.filter_tokens)
+                                all_highlights.extend((token, "cyan") for token in self.filter_tokens)
                             message_text = self._highlight_multiple(str(message_text), all_highlights)
 
                     formatted = self._format_log_line(ts_str, message_text, stream_name)
@@ -265,9 +265,7 @@ class CloudWatchTailer:
                 print(f"Error: {e}", file=sys.stderr)
                 print(traceback.format_exc(), file=sys.stderr)
                 # use a sleep to avoid busy-waiting
-                sleep(100)
-
-
+                sleep(10)
 
 def main():
     """
