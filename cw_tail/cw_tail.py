@@ -47,8 +47,10 @@ class CloudWatchTailer:
     Tail an AWS CloudWatch log group with a simplified layout.
     """
     def __init__(self, **kwargs):
+        self.delay = 5
         for key, value in kwargs.items():
             setattr(self, key, value)
+        
         
         self._parse_filter_and_exclude_tokens()
 
@@ -135,7 +137,7 @@ class CloudWatchTailer:
             Exclude tokens: {self.exclude_tokens or '(none)'}
             Exclude streams: {self.exclude_streams or '(none)'}
             Highlight tokens: {self.highlight_tokens or '(none)'}
-            Fetching logs since: {self.since} seconds ago
+            Fetching logs since: {self.since} seconds ago ({self.delay}s delay)
             Press Ctrl+C to stop.
             {("=" * cols)}
         """
@@ -265,18 +267,20 @@ class CloudWatchTailer:
         self._scroll_up()
         self._print_header()
 
-        # Get the streams we DO want to include (i.e. everything except the excludes)
+        # Track when we last refreshed streams
+        last_stream_refresh = 0
+        stream_refresh_interval = 60  # Refresh stream list every 60 seconds
         included_streams = []
-        if self.exclude_streams:
-            included_streams = self._get_included_streams()
-        
-        # If we have more than 100 streams, we'll chunk them:
-        def chunk_list(lst, chunk_size=100):
-            for i in range(0, len(lst), chunk_size):
-                yield lst[i:i+chunk_size]
-        
+
         while True:
             try:
+                # Periodically refresh the stream list if we're excluding streams
+                if self.exclude_streams:
+                    current_time = time.time()
+                    if current_time - last_stream_refresh > stream_refresh_interval:
+                        included_streams = self._get_included_streams()
+                        last_stream_refresh = current_time
+
                 # We'll gather all events from every chunk of included_streams in a single loop iteration
                 all_events = []
 
@@ -343,7 +347,7 @@ class CloudWatchTailer:
                     formatted = self._format_log_line(ts_str, message_text, stream_name)
                     console.print(formatted, end="")
 
-                sleep(1)
+                sleep(int(self.delay/2))
                 if all_events:
                     max_ts = max(e["timestamp"] for e in all_events)
                     if max_ts > start_time:
@@ -355,7 +359,7 @@ class CloudWatchTailer:
             except Exception as e:
                 print(f"Error: {e}", file=sys.stderr)
                 print(traceback.format_exc(), file=sys.stderr)
-                sleep(2)
+                sleep(self.delay)
 
 def main():
     """

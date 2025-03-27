@@ -7,6 +7,7 @@ from pathlib import Path
 from rich.text import Text
 
 __all__ = [
+    "chunk_list",
     "color_funcs",
     "load_config",
     "parse_command_line_arguments",
@@ -14,6 +15,21 @@ __all__ = [
     "parse_time_string",
     "sleep",
 ]
+
+
+def chunk_list(lst, n):
+    """
+    Split a list into chunks of size n.
+    
+    Args:
+        lst: The list to chunk
+        n: The maximum size of each chunk
+    
+    Returns:
+        Generator yielding chunks of the list
+    """
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 
 def color_funcs():
