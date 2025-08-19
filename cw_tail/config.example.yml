@@ -1,11 +1,13 @@
 default:
   region: us-east-1
   since: 1h
+  timeout: 5m
   colorize: true
 
 prod:
   log_group: production-logs
   since: 10m
+  timeout: 10m
   highlight_tokens:
     - 301
     - 302
@@ -24,7 +26,8 @@ prod:
 
 dev:
   log_group: development-logs
-  since: 10m``
+  since: 10m
+  timeout: 5m
   highlight_tokens: [429, 500, error, warning, critical]
   exclude_tokens: []
   formatter: json_formatter

@@ -48,9 +48,13 @@ class CloudWatchTailer:
     """
     def __init__(self, **kwargs):
         self.delay = 5
+        self.timeout = 5  # Default timeout in minutes
         for key, value in kwargs.items():
             setattr(self, key, value)
         
+        # If timeout was explicitly set to None, keep it as None (disabled)
+        if "timeout" in kwargs and kwargs["timeout"] is None:
+            self.timeout = None
         
         self._parse_filter_and_exclude_tokens()
 
@@ -127,6 +131,8 @@ class CloudWatchTailer:
         """
         cols, _ = shutil.get_terminal_size(fallback=(80, 24))
 
+        timeout_info = f"Timeout: {self.timeout} minutes" if self.timeout else "Timeout: Disabled (run indefinitely)"
+        
         header = f"""
             {("=" * cols)}
             cw-tail v{PACKAGE_VERSION}
@@ -138,6 +144,7 @@ class CloudWatchTailer:
             Exclude streams: {self.exclude_streams or '(none)'}
             Highlight tokens: {self.highlight_tokens or '(none)'}
             Fetching logs since: {self.since} seconds ago ({self.delay}s delay)
+            {timeout_info}
             Press Ctrl+C to stop.
             {("=" * cols)}
         """
@@ -272,8 +279,25 @@ class CloudWatchTailer:
         stream_refresh_interval = 60  # Refresh stream list every 60 seconds
         included_streams = []
 
+        # Set up timeout tracking
+        if self.timeout:
+            timeout_seconds = self.timeout * 60  # Convert minutes to seconds
+            start_time_timestamp = time.time()
+            console.print(f"[yellow]Tail will automatically stop after {self.timeout} minutes[/yellow]")
+
         while True:
             try:
+                # Check for timeout
+                if self.timeout:
+                    elapsed_time = time.time() - start_time_timestamp
+                    if elapsed_time >= timeout_seconds:
+                        console.print(f"\n[yellow]Timeout reached ({self.timeout} minutes). Stopping tail...[/yellow]")
+                        break
+                    # Show remaining time every 5 minutes
+                    remaining_minutes = int((timeout_seconds - elapsed_time) / 60)
+                    if int(elapsed_time) % 300 == 0 and remaining_minutes > 0:  # Every 5 minutes
+                        console.print(f"[dim]Remaining time: {remaining_minutes} minutes[/dim]")
+
                 # Periodically refresh the stream list if we're excluding streams
                 if self.exclude_streams:
                     current_time = time.time()
@@ -421,6 +445,10 @@ Examples:
         "--format-options",
         help="Querystring-like options to pass to the formatter. (Set FORMAT_OPTIONS in your .env file)"
     )
+    parser.add_argument(
+        "--timeout",
+        help="Automatically stop tailing after this many minutes. (e.g., 10, 30, 60)"
+    )
 
     args = parser.parse_args()
     
@@ -432,6 +460,11 @@ Examples:
 
     # Convert time strings to seconds
     config["since"] = parse_time_string(config.get("since", "1h"))
+    
+    # Parse timeout (default to 5 minutes, convert from seconds to minutes)
+    timeout_str = config.get("timeout", "5m")
+    timeout_seconds = parse_time_string(timeout_str)
+    config["timeout"] = timeout_seconds // 60 if timeout_seconds > 0 else None
 
     tailer = CloudWatchTailer(**config)
     tailer.tail()
